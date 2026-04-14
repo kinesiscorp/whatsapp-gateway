@@ -1,0 +1,16 @@
+{
+  "name": "whatsapp-gateway-baileys",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Gateway simples de WhatsApp usando Baileys",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.16",
+    "dotenv": "^17.4.2",
+    "pino": "^9.6.0",
+    "qrcode-terminal": "^0.12.0"
+  }
+}
