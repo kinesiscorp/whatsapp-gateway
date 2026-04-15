@@ -22,7 +22,7 @@ function json(res, status, obj) {
 export function startSendHttpServer() {
   const port = Number(process.env.HTTP_PORT || 0);
   if (!port) {
-    console.log("ℹ️  HTTP desligado (defina HTTP_PORT para habilitar POST /send)");
+    console.log("HTTP desligado (defina HTTP_PORT para habilitar POST /send)");
     return;
   }
 
@@ -78,9 +78,27 @@ export function startSendHttpServer() {
   });
 
   server.listen(port, () => {
-    console.log(`🌐 HTTP: POST http://127.0.0.1:${port}/send`);
+    const localUrl = `http://127.0.0.1:${port}/send`;
+    const publicBase = process.env.COOLIFY_URL
+      ? process.env.COOLIFY_URL
+      : process.env.COOLIFY_FQDN
+        ? `http://${process.env.COOLIFY_FQDN}`
+        : "";
+
+    let publicUrl = "";
+    if (publicBase) {
+      try {
+        const u = new URL(publicBase);
+        u.pathname = u.pathname.replace(/\/?$/, "/send");
+        publicUrl = u.toString();
+      } catch {
+        // ignore malformed COOLIFY_URL
+      }
+    }
+
+    console.log(`HTTP /send pronto em ${localUrl}${publicUrl ? ` (público: ${publicUrl})` : ""}`);
     if (!process.env.API_SECRET) {
-      console.warn("⚠️  API_SECRET vazio — qualquer cliente na rede pode chamar /send");
+      console.warn("ATENÇÃO: API_SECRET vazio — qualquer cliente na rede pode chamar /send");
     }
   });
 }
