@@ -151,3 +151,4 @@ Respostas: `200` `{ "ok": true }`; `400` JSON inválido ou campos faltando; `401
 ## 📝 Licença
 
 MIT
+
