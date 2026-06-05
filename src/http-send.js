@@ -1,5 +1,5 @@
 import http from "http";
-import { getActiveSock, sendMessage } from "./baileys.js";
+import { getActiveSock, sendMessage, normalizeWhatsAppNumber } from "./baileys.js";
 
 function readBody(req) {
   return new Promise((resolve, reject) => {
@@ -58,6 +58,18 @@ export function startSendHttpServer() {
       return;
     }
 
+    const normalized = normalizeWhatsAppNumber(number);
+    if (!normalized || normalized.length < 12) {
+      json(res, 400, {
+        ok: false,
+        error: "invalid_number",
+        hint: "Use DDI 55 + DDD + número, ex.: 5517936309413 (só dígitos ou com +55)",
+      });
+      return;
+    }
+
+    console.log(`[HTTP POST /send] number=${normalized} textLen=${text.trim().length}`);
+
     const sock = getActiveSock();
     if (!sock) {
       json(res, 503, { ok: false, error: "whatsapp_not_connected" });
@@ -65,7 +77,8 @@ export function startSendHttpServer() {
     }
 
     try {
-      await sendMessage(sock, number.trim(), text.trim());
+      await sendMessage(sock, normalized, text.trim());
+      console.log(`[HTTP POST /send] ok number=${normalized}`);
       json(res, 200, { ok: true });
     } catch (e) {
       console.error("POST /send:", e);

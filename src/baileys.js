@@ -82,14 +82,32 @@ export async function connectToWhatsApp(onMessage) {
   return sock;
 }
 
+const DEFAULT_COUNTRY_CODE = "55";
+
+/**
+ * Apenas dígitos; se faltar DDI do Brasil, prefixa 55 (igual ao backend).
+ * Aceita: "5517936309413", "+5517936309413", "17936309413", "(17) 93630-9413"
+ */
+export function normalizeWhatsAppNumber(raw) {
+  const digits = String(raw || "").replace(/\D/g, "");
+  if (!digits) return "";
+  if (digits.startsWith(DEFAULT_COUNTRY_CODE) && digits.length >= 12) return digits;
+  if (digits.length >= 10) return `${DEFAULT_COUNTRY_CODE}${digits}`;
+  return digits;
+}
+
 /**
  * Envia mensagem de texto para um número.
- * Número no formato: "5511999999999"
+ * Número: preferir "5517936309413" (DDI 55 + DDD + número, só dígitos).
  */
 export async function sendMessage(sock, number, text) {
-  const jid = number.replace(/\D/g, "") + "@s.whatsapp.net";
+  const normalized = normalizeWhatsAppNumber(number);
+  if (!normalized) {
+    throw new Error("invalid_number");
+  }
+  const jid = `${normalized}@s.whatsapp.net`;
   await sock.sendMessage(jid, { text });
-  console.log(`📤 Enviado para ${number}: "${text}"`);
+  console.log(`📤 Enviado para ${normalized} (jid ${jid}): "${text}"`);
 }
 
 /**
