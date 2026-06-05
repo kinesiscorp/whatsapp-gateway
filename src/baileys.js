@@ -85,15 +85,67 @@ export async function connectToWhatsApp(onMessage) {
 const DEFAULT_COUNTRY_CODE = "55";
 
 /**
+ * Celular BR sem o 9: 55 + DDD(2) + 8 dígitos (12 no total) → insere 9 após o DDD.
+ */
+export function insertBrazilMobileNine(e164Digits) {
+  if (!e164Digits.startsWith(DEFAULT_COUNTRY_CODE) || e164Digits.length !== 12) {
+    return e164Digits;
+  }
+  const ddd = e164Digits.slice(2, 4);
+  const local = e164Digits.slice(4);
+  if (local.length !== 8) return e164Digits;
+  return `${DEFAULT_COUNTRY_CODE}${ddd}9${local}`;
+}
+
+/**
  * Apenas dígitos; se faltar DDI do Brasil, prefixa 55 (igual ao backend).
  * Aceita: "5517936309413", "+5517936309413", "17936309413", "(17) 93630-9413"
  */
 export function normalizeWhatsAppNumber(raw) {
   const digits = String(raw || "").replace(/\D/g, "");
   if (!digits) return "";
-  if (digits.startsWith(DEFAULT_COUNTRY_CODE) && digits.length >= 12) return digits;
-  if (digits.length >= 10) return `${DEFAULT_COUNTRY_CODE}${digits}`;
-  return digits;
+  let n = digits;
+  if (!n.startsWith(DEFAULT_COUNTRY_CODE) && n.length >= 10) {
+    n = `${DEFAULT_COUNTRY_CODE}${n}`;
+  }
+  if (n.startsWith(DEFAULT_COUNTRY_CODE) && n.length >= 12) {
+    n = insertBrazilMobileNine(n);
+  }
+  return n;
+}
+
+/** Variantes E.164 para consultar onWhatsApp (com/sem 9 em celular BR). */
+export function whatsAppNumberCandidates(normalized) {
+  const out = [normalized];
+  if (!normalized.startsWith(DEFAULT_COUNTRY_CODE)) return out;
+  const rest = normalized.slice(2);
+  if (rest.length === 11 && rest[2] === "9") {
+    out.push(`${DEFAULT_COUNTRY_CODE}${rest.slice(0, 2)}${rest.slice(3)}`);
+  }
+  if (rest.length === 10) {
+    out.push(insertBrazilMobileNine(normalized));
+  }
+  return [...new Set(out)];
+}
+
+/**
+ * Resolve JID canônico via WhatsApp (evita enviar para @s.whatsapp.net inválido).
+ */
+export async function resolveWhatsAppJid(sock, normalized) {
+  const candidates = whatsAppNumberCandidates(normalized);
+  for (const num of candidates) {
+    const jid = `${num}@s.whatsapp.net`;
+    const results = await sock.onWhatsApp(jid);
+    const hit = results?.[0];
+    if (hit?.exists) {
+      return { jid: hit.jid || jid, digits: num };
+    }
+  }
+  return null;
+}
+
+export function isWhatsAppReady(sock) {
+  return Boolean(sock?.user?.id);
 }
 
 /**
@@ -105,9 +157,21 @@ export async function sendMessage(sock, number, text) {
   if (!normalized) {
     throw new Error("invalid_number");
   }
-  const jid = `${normalized}@s.whatsapp.net`;
-  await sock.sendMessage(jid, { text });
-  console.log(`📤 Enviado para ${normalized} (jid ${jid}): "${text}"`);
+  if (!isWhatsAppReady(sock)) {
+    throw new Error("whatsapp_not_ready");
+  }
+
+  const resolved = await resolveWhatsAppJid(sock, normalized);
+  if (!resolved) {
+    throw new Error("number_not_on_whatsapp");
+  }
+
+  const sent = await sock.sendMessage(resolved.jid, { text });
+  const msgId = sent?.key?.id || "";
+  console.log(
+    `📤 Enviado para ${resolved.digits} (jid ${resolved.jid}, id ${msgId}): "${text}"`
+  );
+  return { jid: resolved.jid, digits: resolved.digits, messageId: msgId };
 }
 
 /**

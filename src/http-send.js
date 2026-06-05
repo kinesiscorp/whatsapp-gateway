@@ -1,5 +1,10 @@
 import http from "http";
-import { getActiveSock, sendMessage, normalizeWhatsAppNumber } from "./baileys.js";
+import {
+  getActiveSock,
+  sendMessage,
+  normalizeWhatsAppNumber,
+  isWhatsAppReady,
+} from "./baileys.js";
 
 function readBody(req) {
   return new Promise((resolve, reject) => {
@@ -27,7 +32,22 @@ export function startSendHttpServer() {
   }
 
   const server = http.createServer(async (req, res) => {
-    if (req.method !== "POST" || req.url !== "/send") {
+    const path = (req.url || "").split("?")[0];
+
+    if (req.method === "GET" && path === "/health") {
+      const sock = getActiveSock();
+      const ready = isWhatsAppReady(sock);
+      json(res, ready ? 200 : 503, {
+        ok: ready,
+        whatsapp: ready ? "connected" : "disconnected",
+        ...(ready && sock.user?.id
+          ? { account: String(sock.user.id).split(":")[0].replace(/\D/g, "") }
+          : {}),
+      });
+      return;
+    }
+
+    if (req.method !== "POST" || path !== "/send") {
       json(res, 404, { ok: false, error: "not_found" });
       return;
     }
@@ -71,21 +91,42 @@ export function startSendHttpServer() {
     console.log(`[HTTP POST /send] number=${normalized} textLen=${text.trim().length}`);
 
     const sock = getActiveSock();
-    if (!sock) {
+    if (!sock || !isWhatsAppReady(sock)) {
       json(res, 503, { ok: false, error: "whatsapp_not_connected" });
       return;
     }
 
     try {
-      await sendMessage(sock, normalized, text.trim());
-      console.log(`[HTTP POST /send] ok number=${normalized}`);
-      json(res, 200, { ok: true });
+      const result = await sendMessage(sock, normalized, text.trim());
+      console.log(
+        `[HTTP POST /send] ok number=${result.digits} jid=${result.jid} msgId=${result.messageId || "-"}`
+      );
+      json(res, 200, {
+        ok: true,
+        jid: result.jid,
+        number: result.digits,
+        ...(result.messageId ? { messageId: result.messageId } : {}),
+      });
     } catch (e) {
-      console.error("POST /send:", e);
+      const msg = String(e?.message || e);
+      console.error("POST /send:", msg);
+      if (msg === "number_not_on_whatsapp") {
+        json(res, 422, {
+          ok: false,
+          error: "number_not_on_whatsapp",
+          hint: "Número não está no WhatsApp ou está incorreto (confira DDD e o 9 do celular)",
+          number: normalized,
+        });
+        return;
+      }
+      if (msg === "whatsapp_not_ready") {
+        json(res, 503, { ok: false, error: "whatsapp_not_connected" });
+        return;
+      }
       json(res, 500, {
         ok: false,
         error: "send_failed",
-        message: String(e?.message || e),
+        message: msg,
       });
     }
   });
