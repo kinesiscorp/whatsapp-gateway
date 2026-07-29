@@ -2,6 +2,7 @@ import makeWASocket, {
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
   DisconnectReason,
+  proto,
 } from "@whiskeysockets/baileys";
 import qrcode from "qrcode-terminal";
 import pino from "pino";
@@ -14,6 +15,17 @@ const SESSION_DIR = path.join(__dirname, "..", "sessions");
 
 /** Socket com sessão aberta (usado pelo HTTP /send e reconexões). */
 let activeSock = null;
+
+/** Cache mínimo de mensagens para o callback getMessage (exigido pelo Baileys 6.x). */
+const messageCache = new Map();
+
+/**
+ * Mapeamento LID (@lid) → JID de telefone (@s.whatsapp.net).
+ * Populado via contacts.upsert quando o WhatsApp sincroniza contatos.
+ * Necessário porque em clientes novos o remoteJid chega como @lid,
+ * mas o sendMessage precisa do JID de telefone para entrega real.
+ */
+const lidToPhoneJid = new Map();
 
 export function getActiveSock() {
   return activeSock;
@@ -35,10 +47,32 @@ export async function connectToWhatsApp(onMessage) {
     version,
     auth: state,
     logger: pino({ level: "silent" }),
+    // Necessário para entrega confiável de mensagens no Baileys 6.x
+    getMessage: async (key) => {
+      const cached = messageCache.get(key.id ?? "");
+      if (cached) return cached;
+      return proto.Message.fromObject({});
+    },
+    // Não sincroniza histórico completo (mais rápido e evita problemas de entrega)
+    syncFullHistory: false,
+    markOnlineOnConnect: false,
   });
 
   // Salva credenciais quando atualizadas
   sock.ev.on("creds.update", saveCreds);
+
+  // Constrói mapa LID → JID de telefone para entrega de mensagens
+  sock.ev.on("contacts.upsert", (contacts) => {
+    for (const c of contacts) {
+      if (!c.id || !c.lid) continue;
+      const lid = c.lid.includes("@") ? c.lid : `${c.lid}@lid`;
+      const phone = c.id.includes("@") ? c.id : `${c.id}@s.whatsapp.net`;
+      if (!phone.endsWith("@lid")) {
+        lidToPhoneJid.set(lid, phone);
+      }
+    }
+    console.log(`[contacts] ${lidToPhoneJid.size} LID(s) mapeado(s)`);
+  });
 
   // Gerencia conexão, QR e reconexão
   sock.ev.on("connection.update", (update) => {
@@ -71,11 +105,25 @@ export async function connectToWhatsApp(onMessage) {
 
   // Escuta mensagens recebidas
   sock.ev.on("messages.upsert", ({ messages, type }) => {
+    for (const msg of messages) {
+      if (msg.message && msg.key.id) {
+        messageCache.set(msg.key.id, msg.message);
+        if (messageCache.size > 500) {
+          const firstKey = messageCache.keys().next().value;
+          messageCache.delete(firstKey);
+        }
+      }
+    }
+
     if (type !== "notify") return;
 
     for (const msg of messages) {
       if (msg.key.fromMe || !msg.message) continue;
-      if (onMessage) onMessage(sock, msg);
+      if (onMessage) {
+        Promise.resolve(onMessage(sock, msg)).catch((err) => {
+          console.error("❌ Erro ao processar mensagem:", err?.message || err);
+        });
+      }
     }
   });
 
@@ -175,10 +223,55 @@ export async function sendMessage(sock, number, text) {
 }
 
 /**
+ * Resolve @lid → @s.whatsapp.net para que a mensagem seja entregue.
+ *
+ * Ordem de tentativa:
+ *  1. Cache local (populado via contacts.upsert)
+ *  2. Lookup remoto via sock.onWhatsApp (USyncQuery – busca no servidor WA)
+ *  3. Fallback: retorna o próprio LID (último recurso)
+ */
+async function resolveReplyJid(sock, rawJid) {
+  if (!rawJid?.endsWith("@lid")) return rawJid;
+
+  const cached = lidToPhoneJid.get(rawJid);
+  if (cached) {
+    console.log(`[lid] cache: ${rawJid} → ${cached}`);
+    return cached;
+  }
+
+  try {
+    const results = await sock.onWhatsApp(rawJid);
+    const hit = results?.[0];
+    if (hit?.exists && hit.jid) {
+      const resolved = hit.jid.endsWith("@lid") ? rawJid : hit.jid;
+      if (!resolved.endsWith("@lid")) {
+        lidToPhoneJid.set(rawJid, resolved);
+        console.log(`[lid] resolvido: ${rawJid} → ${resolved}`);
+        return resolved;
+      }
+    }
+  } catch (err) {
+    console.warn(`[lid] onWhatsApp falhou para ${rawJid}:`, err?.message || err);
+  }
+
+  console.warn(`[lid] sem resolução para ${rawJid} — enviando direto (pode falhar)`);
+  return rawJid;
+}
+
+/**
  * Responde uma mensagem (com quote).
  */
 export async function replyMessage(sock, msg, text) {
-  await sock.sendMessage(msg.key.remoteJid, { text }, { quoted: msg });
+  const rawJid = msg.key.remoteJid;
+  const jid = await resolveReplyJid(sock, rawJid);
+  console.log(`💬 replyMessage → jid=${jid} textLen=${text.length}`);
+  try {
+    const sent = await sock.sendMessage(jid, { text }, { quoted: msg });
+    console.log(`💬 replyMessage ok → msgId=${sent?.key?.id || "-"}`);
+  } catch (err) {
+    console.error(`💬 replyMessage erro → jid=${jid}:`, err?.message || err);
+    throw err;
+  }
 }
 
 /**

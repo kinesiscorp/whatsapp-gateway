@@ -42,7 +42,11 @@ export async function handleCommand(sock, msg, text) {
 
   if (commands[cmd]) {
     console.log(`⚡ Comando: ${cmd}`);
-    await commands[cmd].run(sock, msg);
+    try {
+      await commands[cmd].run(sock, msg);
+    } catch (err) {
+      console.error(`❌ Erro ao executar ${cmd}:`, err?.message || err);
+    }
     return true;
   }
 
